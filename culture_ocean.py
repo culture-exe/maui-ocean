@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Culture Maui Ocean Beach Synthesizer (culture-ocean)
-Generative, on-demand ocean beach acoustic landscape engine modeled after Maui coastlines.
+Hawaiian Ocean Beach Synthesizer (culture-ocean)
+Generative, on-demand ocean beach acoustic landscape engine modeled after Maui & Kauaʻi shorelines.
 """
 
 import sys
@@ -14,9 +14,8 @@ import subprocess
 from pathlib import Path
 import numpy as np
 
-# Add local src directory to import path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from src.synth_engine import MauiOceanSynthesizer, SAMPLE_RATE
+from src.synth_engine import HawaiianOceanSynthesizer, SAMPLE_RATE
 
 STATE_DIR = Path.home() / '.local/state/culture-ocean'
 PID_FILE = STATE_DIR / 'ocean.pid'
@@ -45,11 +44,9 @@ def get_active_process():
     except Exception:
         return None, None
     
-    # Check if process exists and is actually culture-ocean
     try:
         os.kill(pid, 0)
     except OSError:
-        # Stale pid
         try:
             PID_FILE.unlink(missing_ok=True)
             INFO_FILE.unlink(missing_ok=True)
@@ -92,7 +89,7 @@ def stop_playback():
 
 def run_audio_stream(preset='napili', volume=1.0, duration=None, birds=True, output_wav=None, raw_stdout=False):
     """Core audio loop for streaming to ALSA or file."""
-    synth = MauiOceanSynthesizer(preset_name=preset, sample_rate=SAMPLE_RATE)
+    synth = HawaiianOceanSynthesizer(preset_name=preset, sample_rate=SAMPLE_RATE)
     if not birds:
         synth.preset['wildlife_prob'] = 0.0
 
@@ -112,7 +109,6 @@ def run_audio_stream(preset='napili', volume=1.0, duration=None, birds=True, out
     elif raw_stdout:
         pass
     else:
-        # Pipe directly into aplay
         cmd = ['aplay', '-q', '-D', 'default', '-f', 'S16_LE', '-r', str(SAMPLE_RATE), '-c', '2']
         aplay_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
@@ -168,9 +164,7 @@ def run_audio_stream(preset='napili', volume=1.0, duration=None, birds=True, out
         cleanup()
 
 def start_background(preset='napili', volume=1.0, duration=None, birds=True):
-    # Stop any running ocean first
     stop_playback()
-
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     args = [sys.executable, str(Path(__file__).resolve()), '_worker',
@@ -189,9 +183,12 @@ def start_background(preset='napili', volume=1.0, duration=None, birds=True):
         start_new_session=True
     )
 
+    p_info = HawaiianOceanSynthesizer.PRESETS.get(preset, {})
     info = {
         'pid': proc.pid,
         'preset': preset,
+        'island': p_info.get('island', 'Hawaii'),
+        'preset_name': p_info.get('name', 'Custom'),
         'volume': volume,
         'duration_sec': duration,
         'birds': birds,
@@ -218,7 +215,8 @@ def show_status(json_output=False):
             'playing': True,
             'pid': pid,
             'preset': info.get('preset'),
-            'preset_name': MauiOceanSynthesizer.PRESETS.get(info.get('preset'), {}).get('name', 'Custom'),
+            'island': info.get('island', 'Hawaii'),
+            'preset_name': info.get('preset_name') or HawaiianOceanSynthesizer.PRESETS.get(info.get('preset'), {}).get('name', 'Custom'),
             'volume': info.get('volume', 1.0),
             'duration_sec': info.get('duration_sec'),
             'uptime_sec': round(uptime, 1),
@@ -235,32 +233,40 @@ def show_status(json_output=False):
         else:
             print("🌊 Ocean Soundscape: Playing")
             print(f"   PID:         {status['pid']}")
+            print(f"   Island:      {status['island']}")
             print(f"   Preset:      {status['preset']} ({status['preset_name']})")
             print(f"   Volume:      {int(status['volume'] * 100)}%")
-            print(f"   Birds:       {'Enabled (Kōlea plover)' if status['birds'] else 'Disabled'}")
+            print(f"   Birds:       {'Enabled' if status['birds'] else 'Disabled'}")
             print(f"   Duration:    {str(status['duration_sec']) + 's' if status['duration_sec'] else 'Continuous / Infinite'}")
             print(f"   Elapsed:     {status['uptime_human']}")
 
 def list_presets():
-    print("🌺 Maui Ocean Beach Soundscape Presets:\n")
-    for key, p in MauiOceanSynthesizer.PRESETS.items():
-        print(f"  • {key.ljust(12)} - {p['name']}")
-        print(f"    {p['description']}\n")
+    print("🌺 Hawaiian Ocean Beach Soundscape Presets:\n")
+    islands = {}
+    for key, p in HawaiianOceanSynthesizer.PRESETS.items():
+        isl = p.get('island', 'Other')
+        islands.setdefault(isl, []).append((key, p))
+
+    for isl, presets in islands.items():
+        print(f"=== {isl.upper()} ===")
+        for key, p in presets:
+            print(f"  • {key.ljust(12)} - {p['name']}")
+            print(f"    {p['description']}\n")
 
 def main():
     parser = argparse.ArgumentParser(
-        description="🌊 Culture Maui Ocean Beach Synthesizer - Generative, on-demand acoustic soundscapes."
+        description="🌊 Hawaiian Ocean Beach Synthesizer (culture-ocean) - Generative, on-demand acoustic soundscapes."
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # play
-    p_play = subparsers.add_parser('play', help='Play Maui ocean soundscape')
-    p_play.add_argument('--preset', choices=list(MauiOceanSynthesizer.PRESETS.keys()), default='napili',
-                        help='Beach acoustic profile (napili, makena, northshore, keawakapu)')
+    p_play = subparsers.add_parser('play', help='Play Hawaiian ocean soundscape')
+    p_play.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()), default='napili',
+                        help='Beach acoustic profile (napili, makena, northshore, keawakapu, hanalei, polihale, kee, poipu, anini)')
     p_play.add_argument('--duration', '-d', type=parse_duration, default=None,
                         help='Playback duration (e.g. 30s, 10m, 1h). Default: continuous infinite')
     p_play.add_argument('--volume', '-v', type=float, default=1.0, help='Volume scaling (0.1 to 2.0)')
-    p_play.add_argument('--no-birds', action='store_true', help='Disable procedural Hawaiian coastal birds')
+    p_play.add_argument('--no-birds', action='store_true', help='Disable procedural coastal birds')
     p_play.add_argument('--foreground', '-f', action='store_true', help='Run in foreground instead of background daemon')
 
     # stop
@@ -271,19 +277,19 @@ def main():
     p_status.add_argument('--json', action='store_true', help='Output in JSON format')
 
     # presets
-    p_presets = subparsers.add_parser('presets', help='List available Maui beach presets')
+    p_presets = subparsers.add_parser('presets', help='List available Hawaiian beach presets')
 
     # render
     p_render = subparsers.add_parser('render', help='Render ocean audio to a WAV file')
     p_render.add_argument('output', help='Output WAV file path')
-    p_render.add_argument('--preset', choices=list(MauiOceanSynthesizer.PRESETS.keys()), default='napili')
+    p_render.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()), default='napili')
     p_render.add_argument('--duration', '-d', type=parse_duration, default=30.0, help='Duration to render (default: 30s)')
     p_render.add_argument('--volume', '-v', type=float, default=1.0)
     p_render.add_argument('--no-birds', action='store_true')
 
     # stream (stdout)
     p_stream = subparsers.add_parser('stream', help='Stream raw 16-bit 48kHz stereo PCM to stdout')
-    p_stream.add_argument('--preset', choices=list(MauiOceanSynthesizer.PRESETS.keys()), default='napili')
+    p_stream.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()), default='napili')
     p_stream.add_argument('--duration', '-d', type=parse_duration, default=None)
     p_stream.add_argument('--volume', '-v', type=float, default=1.0)
     p_stream.add_argument('--no-birds', action='store_true')
@@ -306,7 +312,7 @@ def main():
         print(msg)
     elif args.command == 'play':
         if args.foreground:
-            print(f"🌊 Playing Maui ocean soundscape ({args.preset}). Press Ctrl+C to stop...")
+            print(f"🌊 Playing Hawaiian ocean soundscape ({args.preset}). Press Ctrl+C to stop...")
             run_audio_stream(
                 preset=args.preset,
                 volume=args.volume,
@@ -320,9 +326,9 @@ def main():
                 duration=args.duration,
                 birds=not args.no_birds
             )
-            p_name = MauiOceanSynthesizer.PRESETS[args.preset]['name']
+            p_name = HawaiianOceanSynthesizer.PRESETS[args.preset]['name']
             dur_str = f"for {args.duration}s" if args.duration else "continuously"
-            print(f"🌊 Started Maui ocean soundscape ({args.preset} - {p_name}) {dur_str} in background.")
+            print(f"🌊 Started Hawaiian ocean soundscape ({args.preset} - {p_name}) {dur_str} in background.")
             print(f"   Volume: {int(args.volume * 100)}% | PID: {pid}")
             print(f"   Run 'culture-ocean stop' or ask me anytime to stop playing.")
     elif args.command == 'render':

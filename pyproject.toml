@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "culture-ocean"
-version = "0.1.0"
-description = "Generative real-time procedural ocean beach acoustic synthesizer modeled after Maui shorelines"
+version = "0.2.0"
+description = "Generative real-time procedural ocean beach acoustic synthesizer modeled after Maui and Kauaʻi shorelines"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
