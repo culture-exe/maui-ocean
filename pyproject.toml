@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "culture-ocean"
-version = "0.2.0"
+version = "0.2.1"
 description = "Generative real-time procedural ocean beach acoustic synthesizer modeled after Maui and Kauaʻi shorelines"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -16,6 +16,11 @@ dependencies = [
 [project.scripts]
 culture-ocean = "culture_ocean:main"
 maui-beach = "culture_ocean:main"
+
+[tool.setuptools]
+# The CLI lives in the top-level module `culture_ocean.py`; the DSP engine is
+# the `src` package.  Include both so `pip install .` provides the entry point.
+py-modules = ["culture_ocean"]
 
 [tool.setuptools.packages.find]
 where = ["."]

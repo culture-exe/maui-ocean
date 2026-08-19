@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Hawaiian Ocean Beach Synthesizer (culture-ocean)
-Generative, on-demand ocean beach acoustic landscape engine modeled after Maui & Kauaʻi shorelines.
-Features live NOAA buoy telemetry sync, 24-hour diurnal circadian transitions,
-tropical squalls/rain, shuffle mode, and black sand / blowhole / hollow barrel physical acoustics.
+Generative, on-demand ocean beach acoustic landscape engine modeled after Maui
+& Kauaʻi shorelines.  Features live NOAA buoy telemetry sync (background thread),
+24-hour diurnal circadian transitions, tropical squalls/rain, shuffle mode, and
+black sand / blowhole / hollow barrel physical acoustics.
 """
 
 import sys
@@ -12,9 +13,9 @@ import time
 import json
 import signal
 import random
+import logging
 import argparse
 import subprocess
-import threading
 from pathlib import Path
 import numpy as np
 
@@ -22,14 +23,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.synth_engine import HawaiianOceanSynthesizer, SAMPLE_RATE
 from src.live_data import fetch_live_telemetry, determine_circadian_phase
 
+logger = logging.getLogger("culture-ocean")
+
 STATE_DIR = Path.home() / '.local/state/culture-ocean'
 PID_FILE = STATE_DIR / 'ocean.pid'
 INFO_FILE = STATE_DIR / 'ocean.json'
+LOG_FILE = STATE_DIR / 'culture-ocean.log'
+
+
+def setup_logging():
+    """Configure logging to a state-dir file (falling back to stderr)."""
+    handlers = []
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(LOG_FILE, encoding='utf-8'))
+    except Exception:
+        handlers.append(logging.StreamHandler(sys.stderr))
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+        handlers=handlers,
+    )
+
 
 def parse_duration(val):
-    if not val or str(val).lower() in ('inf', 'infinite', '0', 'none'):
+    """Parse a human duration ('30s', '10m', '1h', raw seconds).
+       Returns float seconds, or None for infinite."""
+    if not val:
         return None
     val = str(val).strip().lower()
+    if val in ('inf', 'infinite', 'none'):
+        return None
     if val.endswith('s'):
         return float(val[:-1])
     elif val.endswith('m'):
@@ -39,7 +64,9 @@ def parse_duration(val):
     try:
         return float(val)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid duration format: '{val}'. Use e.g. 30s, 10m, 1h, or raw seconds.")
+        raise argparse.ArgumentTypeError(
+            f"Invalid duration format: '{val}'. Use e.g. 30s, 10m, 1h, or raw seconds.")
+
 
 def get_active_process():
     if not PID_FILE.exists():
@@ -48,29 +75,32 @@ def get_active_process():
         pid = int(PID_FILE.read_text().strip())
     except Exception:
         return None, None
-    
+
     try:
         os.kill(pid, 0)
     except OSError:
         try:
             PID_FILE.unlink(missing_ok=True)
             INFO_FILE.unlink(missing_ok=True)
-        except Exception: pass
+        except Exception:
+            pass
         return None, None
 
     info = {}
     if INFO_FILE.exists():
         try:
             info = json.loads(INFO_FILE.read_text())
-        except Exception: pass
+        except Exception:
+            pass
 
     return pid, info
+
 
 def stop_playback():
     pid, info = get_active_process()
     if not pid:
         return False, "No active ocean soundscape playback found."
-    
+
     try:
         os.kill(pid, signal.SIGTERM)
         for _ in range(20):
@@ -83,14 +113,16 @@ def stop_playback():
             os.kill(pid, signal.SIGKILL)
     except OSError:
         pass
-    
+
     try:
         PID_FILE.unlink(missing_ok=True)
         INFO_FILE.unlink(missing_ok=True)
-    except Exception: pass
-    
+    except Exception:
+        pass
+
     preset = info.get('preset', 'unknown')
     return True, f"Stopped ocean soundscape (PID {pid}, preset: {preset})."
+
 
 def run_audio_stream(
     preset='napili',
@@ -106,11 +138,13 @@ def run_audio_stream(
     output_wav=None,
     raw_stdout=False
 ):
-    """Core audio loop for streaming to ALSA or file."""
+    """Core audio loop for streaming to ALSA, stdout, or WAV file."""
     forced_rain = None
     if rain:
         forced_rain = rain_intensity if rain_intensity is not None else 0.55
     elif rain_intensity is not None:
+        # `--rain-intensity` alone is ambiguous; only engage rain if explicitly
+        # requested via --rain OR when live telemetry detects precipitation.
         forced_rain = rain_intensity
 
     all_presets = list(HawaiianOceanSynthesizer.PRESETS.keys())
@@ -143,8 +177,21 @@ def run_audio_stream(
     elif raw_stdout:
         pass
     else:
-        cmd = ['aplay', '-q', '-D', 'default', '-f', 'S16_LE', '-r', str(SAMPLE_RATE), '-c', '2']
-        aplay_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        cmd = ['aplay', '-q', '-D', 'default', '-f', 'S16_LE',
+               '-r', str(SAMPLE_RATE), '-c', '2']
+        try:
+            aplay_proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            logger.error("'aplay' not found on PATH — is ALSA/alsa-utils installed?")
+            raise SystemExit("Error: 'aplay' (alsa-utils) is required for live playback.")
+
+        # Detect immediate failure (bad device, busy device, etc.)
+        time.sleep(0.3)
+        if aplay_proc.poll() is not None:
+            err = aplay_proc.stderr.read().decode('utf-8', errors='ignore').strip()
+            logger.error("aplay failed to start: %s", err or 'unknown error')
+            raise SystemExit(f"Error: could not open audio device. {err}")
 
     def close_handles():
         nonlocal aplay_proc, wav_file
@@ -154,12 +201,16 @@ def run_audio_stream(
                 aplay_proc.terminate()
                 aplay_proc.wait(timeout=1.0)
             except Exception:
-                try: aplay_proc.kill()
-                except Exception: pass
+                try:
+                    aplay_proc.kill()
+                except Exception:
+                    pass
             aplay_proc = None
         if wav_file:
-            try: wav_file.close()
-            except Exception: pass
+            try:
+                wav_file.close()
+            except Exception:
+                pass
             wav_file = None
 
     def sig_handler(sig=None, frame=None):
@@ -167,7 +218,8 @@ def run_audio_stream(
         try:
             PID_FILE.unlink(missing_ok=True)
             INFO_FILE.unlink(missing_ok=True)
-        except Exception: pass
+        except Exception:
+            pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, sig_handler)
@@ -189,7 +241,7 @@ def run_audio_stream(
             cur_info['telemetry'] = synth.last_telemetry
             INFO_FILE.write_text(json.dumps(cur_info, indent=2) + '\n')
         except Exception:
-            pass
+            logger.debug("update_state_file failed", exc_info=True)
 
     try:
         while True:
@@ -202,9 +254,10 @@ def run_audio_stream(
 
             now = time.time()
 
+            # Non-blocking: reads cached values from the background telemetry thread.
             if (now - last_telemetry_refresh) > 600.0:
                 last_telemetry_refresh = now
-                synth.refresh_telemetry(force_sync=False)
+                synth.refresh_telemetry()
                 update_state_file()
 
             if shuffle and (now - last_shuffle_time) >= shuffle_interval:
@@ -216,8 +269,7 @@ def run_audio_stream(
                     synth.preset['wildlife_prob'] = 0.0
                 update_state_file()
 
-            chunk = synth.generate_chunk(to_gen)
-            chunk = chunk * np.clip(volume, 0.0, 2.0)
+            chunk = synth.generate_chunk(to_gen, volume=volume)
             pcm_data = np.int16(np.clip(chunk * 32767.0, -32768, 32767)).tobytes()
 
             if wav_file:
@@ -230,11 +282,15 @@ def run_audio_stream(
                     aplay_proc.stdin.write(pcm_data)
                     aplay_proc.stdin.flush()
                 except (BrokenPipeError, OSError):
+                    # aplay died mid-stream
+                    err = aplay_proc.stderr.read().decode('utf-8', errors='ignore').strip()
+                    logger.error("aplay terminated unexpectedly: %s", err or 'unknown')
                     break
 
             samples_produced += to_gen
     finally:
         close_handles()
+
 
 def start_background(
     preset='napili',
@@ -255,7 +311,7 @@ def start_background(
             '--preset', preset,
             '--volume', str(volume),
             '--time', circadian_mode]
-    
+
     if duration:
         args.extend(['--duration', str(duration)])
     if not birds:
@@ -281,9 +337,10 @@ def start_background(
     telemetry = None
     if enable_live or circadian_mode == 'auto':
         try:
+            # Use cached telemetry (non-blocking) to seed the status file.
             telemetry = fetch_live_telemetry(force_refresh=False)
         except Exception:
-            pass
+            logger.debug("Initial telemetry seed failed", exc_info=True)
 
     p_info = HawaiianOceanSynthesizer.PRESETS.get(preset, {})
     info = {
@@ -309,6 +366,7 @@ def start_background(
     INFO_FILE.write_text(json.dumps(info, indent=2) + '\n')
     return proc.pid, info
 
+
 def show_status(json_output=False):
     pid, info = get_active_process()
     if not pid:
@@ -321,7 +379,7 @@ def show_status(json_output=False):
         mins = int(uptime // 60)
         secs = int(uptime % 60)
         telem = info.get('telemetry') or {}
-        
+
         circadian_phase = info.get('circadian_mode', 'auto')
         if circadian_phase == 'auto':
             phase_code, phase_name = determine_circadian_phase()
@@ -334,7 +392,8 @@ def show_status(json_output=False):
             'pid': pid,
             'preset': info.get('preset'),
             'island': info.get('island', 'Hawaii'),
-            'preset_name': info.get('preset_name') or HawaiianOceanSynthesizer.PRESETS.get(info.get('preset'), {}).get('name', 'Custom'),
+            'preset_name': (info.get('preset_name')
+                            or HawaiianOceanSynthesizer.PRESETS.get(info.get('preset'), {}).get('name', 'Custom')),
             'volume': info.get('volume', 1.0),
             'duration_sec': info.get('duration_sec'),
             'uptime_sec': round(uptime, 1),
@@ -349,7 +408,7 @@ def show_status(json_output=False):
             'telemetry': telem,
             'started_at': info.get('started_at_iso')
         }
-    
+
     if json_output:
         print(json.dumps(status, indent=2))
     else:
@@ -364,7 +423,7 @@ def show_status(json_output=False):
             print(f"   Shuffle:     {'Enabled (every ' + str(int(status['shuffle_interval']//60)) + 'm)' if status['shuffle'] else 'Off'}")
             print(f"   Rain/Squall: {'Active' if status['rain'] else 'Dry'}")
             print(f"   Wildlife:    {'Enabled' if status['birds'] else 'Disabled'}")
-            
+
             telem = status.get('telemetry', {})
             if telem and status.get('live_telemetry_enabled'):
                 wvht = telem.get('wave_height_m', 'N/A')
@@ -372,9 +431,10 @@ def show_status(json_output=False):
                 wspd = telem.get('wind_speed_kmh', 'N/A')
                 source = telem.get('source', 'Hawaii Telemetry')
                 print(f"   Live NOAA:   {wvht}m swell @ {period}s | Wind {wspd} km/h [{source}]")
-            
+
             print(f"   Duration:    {str(status['duration_sec']) + 's' if status['duration_sec'] else 'Continuous / Infinite'}")
             print(f"   Elapsed:     {status['uptime_human']}")
+
 
 def list_presets():
     print("🌺 Hawaiian Ocean Beach Soundscape Presets:\n")
@@ -389,66 +449,85 @@ def list_presets():
             print(f"  • {key.ljust(14)} - {p['name']}")
             print(f"    {p['description']}\n")
 
+
 def main():
+    setup_logging()
+
     parser = argparse.ArgumentParser(
-        description="🌊 Hawaiian Ocean Beach Synthesizer (culture-ocean) - Generative, live telemetry acoustic soundscapes."
+        description="🌊 Hawaiian Ocean Beach Synthesizer (culture-ocean) - "
+                    "Generative, live telemetry acoustic soundscapes."
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # play
     p_play = subparsers.add_parser('play', help='Play Hawaiian ocean soundscape')
-    p_play.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()), default='napili',
-                        help='Beach acoustic profile')
+    p_play.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()),
+                        default='napili', help='Beach acoustic profile')
     p_play.add_argument('--duration', '-d', type=parse_duration, default=None,
                         help='Playback duration (e.g. 30s, 10m, 1h). Default: continuous infinite')
-    p_play.add_argument('--volume', '-v', type=float, default=1.0, help='Volume scaling (0.1 to 2.0)')
-    p_play.add_argument('--no-birds', action='store_true', help='Disable procedural coastal wildlife/birds')
-    p_play.add_argument('--foreground', '-f', action='store_true', help='Run in foreground instead of background daemon')
-    p_play.add_argument('--no-live', action='store_true', help='Disable live NOAA marine & weather telemetry sync')
-    p_play.add_argument('--time', choices=['auto', 'dawn', 'day', 'sunset', 'night', 'off'], default='auto',
+    p_play.add_argument('--volume', '-v', type=float, default=1.0,
+                        help='Volume scaling (0.0 to 2.0)')
+    p_play.add_argument('--no-birds', action='store_true',
+                        help='Disable procedural coastal wildlife/birds')
+    p_play.add_argument('--foreground', '-f', action='store_true',
+                        help='Run in foreground instead of background daemon')
+    p_play.add_argument('--no-live', action='store_true',
+                        help='Disable live NOAA marine & weather telemetry sync')
+    p_play.add_argument('--time', choices=['auto', 'dawn', 'day', 'sunset', 'night', 'off'],
+                        default='auto',
                         help='Circadian time-of-day phase (default: auto using Hawaii local time HST)')
-    p_play.add_argument('--rain', action='store_true', help='Engage tropical rain and squall generator')
-    p_play.add_argument('--rain-intensity', type=float, default=None, help='Forced rain intensity (0.0 to 1.0)')
-    p_play.add_argument('--shuffle', action='store_true', help='Shuffle mode: wander between random beach locations & settings')
+    p_play.add_argument('--rain', action='store_true',
+                        help='Engage tropical rain and squall generator')
+    p_play.add_argument('--rain-intensity', type=float, default=None,
+                        help='Forced rain intensity (0.0 to 1.0; requires --rain)')
+    p_play.add_argument('--shuffle', action='store_true',
+                        help='Shuffle mode: wander between random beach locations & settings')
     p_play.add_argument('--shuffle-interval', type=parse_duration, default=600.0,
                         help='Interval for changing location in shuffle mode (default: 10m)')
 
     # stop
-    p_stop = subparsers.add_parser('stop', help='Stop running ocean soundscape')
+    subparsers.add_parser('stop', help='Stop running ocean soundscape')
 
     # status
     p_status = subparsers.add_parser('status', help='Show ocean soundscape status')
     p_status.add_argument('--json', action='store_true', help='Output in JSON format')
 
     # presets
-    p_presets = subparsers.add_parser('presets', help='List available Hawaiian beach presets')
+    subparsers.add_parser('presets', help='List available Hawaiian beach presets')
 
     # render
     p_render = subparsers.add_parser('render', help='Render ocean audio to a WAV file')
     p_render.add_argument('output', help='Output WAV file path')
-    p_render.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()), default='napili')
-    p_render.add_argument('--duration', '-d', type=parse_duration, default=30.0, help='Duration to render (default: 30s)')
+    p_render.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()),
+                          default='napili')
+    p_render.add_argument('--duration', '-d', type=parse_duration, default=30.0,
+                          help='Duration to render (default: 30s)')
     p_render.add_argument('--volume', '-v', type=float, default=1.0)
     p_render.add_argument('--no-birds', action='store_true')
     p_render.add_argument('--no-live', action='store_true')
-    p_render.add_argument('--time', choices=['auto', 'dawn', 'day', 'sunset', 'night', 'off'], default='auto')
+    p_render.add_argument('--time', choices=['auto', 'dawn', 'day', 'sunset', 'night', 'off'],
+                          default='auto')
     p_render.add_argument('--rain', action='store_true')
     p_render.add_argument('--rain-intensity', type=float, default=None)
 
     # stream (stdout)
-    p_stream = subparsers.add_parser('stream', help='Stream raw 16-bit 48kHz stereo PCM to stdout')
-    p_stream.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()), default='napili')
+    p_stream = subparsers.add_parser('stream',
+                                     help='Stream raw 16-bit 48kHz stereo PCM to stdout')
+    p_stream.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()),
+                          default='napili')
     p_stream.add_argument('--duration', '-d', type=parse_duration, default=None)
     p_stream.add_argument('--volume', '-v', type=float, default=1.0)
     p_stream.add_argument('--no-birds', action='store_true')
     p_stream.add_argument('--no-live', action='store_true')
-    p_stream.add_argument('--time', choices=['auto', 'dawn', 'day', 'sunset', 'night', 'off'], default='auto')
+    p_stream.add_argument('--time', choices=['auto', 'dawn', 'day', 'sunset', 'night', 'off'],
+                          default='auto')
     p_stream.add_argument('--rain', action='store_true')
     p_stream.add_argument('--rain-intensity', type=float, default=None)
 
-    # internal worker
-    p_worker = subparsers.add_parser('_worker')
-    p_worker.add_argument('--preset', default='napili')
+    # internal worker (hidden from --help)
+    p_worker = subparsers.add_parser('_worker', help=argparse.SUPPRESS)
+    p_worker.add_argument('--preset', choices=list(HawaiianOceanSynthesizer.PRESETS.keys()),
+                          default='napili')
     p_worker.add_argument('--volume', type=float, default=1.0)
     p_worker.add_argument('--duration', type=float, default=None)
     p_worker.add_argument('--no-birds', action='store_true')
@@ -547,6 +626,7 @@ def main():
             shuffle=args.shuffle,
             shuffle_interval=args.shuffle_interval
         )
+
 
 if __name__ == '__main__':
     main()
